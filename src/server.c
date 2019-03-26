@@ -459,6 +459,7 @@ main(int argc, char **argv) {
     if (server->index != NULL) {
         lwsl_notice("  custom index.html: %s\n", server->index);
     }
+    lwsl_notice("using ae api: %s\n", aeGetApiName());
 
     signal(SIGINT, sig_handler);  // ^C
     signal(SIGTERM, sig_handler); // kill
@@ -481,14 +482,12 @@ main(int argc, char **argv) {
         if (!LIST_EMPTY(&server->clients)) {
             struct tty_client *client;
             LIST_FOREACH(client, &server->clients, list) {
-                if (client->running) {
-                    pthread_mutex_lock(&client->mutex);
-                    if (client->state != STATE_DONE)
-                        lws_callback_on_writable(client->wsi);
-                    else
-                        pthread_cond_signal(&client->cond);
-                    pthread_mutex_unlock(&client->mutex);
-                }
+                pthread_mutex_lock(&client->mutex);
+                if (client->state != STATE_DONE)
+                    lws_callback_on_writable(client->wsi);
+                else
+                    pthread_cond_signal(&client->cond);
+                pthread_mutex_unlock(&client->mutex);
             }
         }
         pthread_mutex_unlock(&server->mutex);

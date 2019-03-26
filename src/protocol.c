@@ -115,8 +115,37 @@ check_host_origin(struct lws *wsi) {
 }
 
 void
-tty_client_remove(struct tty_client *client) {
+tty_client_destroy(struct tty_client *client) {
+    aeStop(client->loop);
+
+    pthread_mutex_lock(&client->mutex);
+    client->state = STATE_DONE;
+    pthread_cond_signal(&client->cond);
+    pthread_mutex_unlock(&client->mutex);
+
+    // kill process (group) and free resource
+#if defined(_WIN32) || defined(__CYGWIN__)
+    int pgid = -1;
+#else
+    int pgid = getpgid(client->pid);
+#endif
+    int pid = pgid > 0 ? -pgid : client->pid;
+    lwsl_notice("sending %s (%d) to process (group) %d\n", server->sig_name, server->sig_code, pid);
+    if (kill(pid, server->sig_code) != 0) {
+        lwsl_err("kill: %d, errno: %d (%s)\n", pid, errno, strerror(errno));
+    }
+    int status;
+    while (waitpid(client->pid, &status, 0) == -1 && errno == EINTR)
+        ;
+    lwsl_notice("process exited with code %d, pid: %d\n", status, client->pid);
+    close(client->pty);
+
     pthread_mutex_lock(&server->mutex);
+    if (client->buffer != NULL)
+        free(client->buffer);
+    pthread_mutex_destroy(&client->mutex);
+    aeDeleteEventLoop(client->loop);
+    // remove from client list
     struct tty_client *iterator;
     LIST_FOREACH(iterator, &server->clients, list) {
         if (iterator == client) {
@@ -129,49 +158,31 @@ tty_client_remove(struct tty_client *client) {
 }
 
 void
-tty_client_destroy(struct tty_client *client) {
-    if (!client->running || client->pid <= 0)
-        goto cleanup;
-
-    client->running = false;
+handle_pty_data(struct aeEventLoop *eventLoop, int fd, void *clientData, int mask) {
+    struct tty_client *client = (struct tty_client *) clientData;
 
     pthread_mutex_lock(&client->mutex);
-    client->state = STATE_DONE;
-    pthread_cond_signal(&client->cond);
+    while (client->state == STATE_READY) {
+        pthread_cond_wait(&client->cond, &client->mutex);
+    }
+    memset(client->pty_buffer, 0, sizeof(client->pty_buffer));
+    client->pty_len = read(fd, client->pty_buffer + LWS_PRE + 1, BUF_SIZE);
+    client->state = STATE_READY;
     pthread_mutex_unlock(&client->mutex);
 
-    // kill process (group) and free resource
-    int pgid = getpgid(client->pid);
-    int pid = pgid > 0 ? -pgid : client->pid;
-    lwsl_notice("sending %s (%d) to process (group) %d\n", server->sig_name, server->sig_code, pid);
-    if (kill(pid, server->sig_code) != 0) {
-        lwsl_err("kill: %d, errno: %d (%s)\n", pid, errno, strerror(errno));
+    if (client->pty_len <= 0) {
+        aeStop(eventLoop);
     }
-    int status;
-    while (waitpid(client->pid, &status, 0) == -1 && errno == EINTR)
-        ;
-    lwsl_notice("process exited with code %d, pid: %d\n", status, client->pid);
-    close(client->pty);
-
-cleanup:
-    // free the buffer
-    if (client->buffer != NULL)
-        free(client->buffer);
-
-    pthread_mutex_destroy(&client->mutex);
-
-    // remove from client list
-    tty_client_remove(client);
 }
 
 void *
 thread_run_command(void *args) {
     struct tty_client *client;
     int pty;
-    fd_set des_set;
 
     client = (struct tty_client *) args;
     pid_t pid = forkpty(&pty, NULL, NULL, NULL);
+    client->loop = aeCreateEventLoop(pty + 1);
 
     switch (pid) {
         case -1: /* error */
@@ -193,34 +204,19 @@ thread_run_command(void *args) {
             lwsl_notice("started process, pid: %d\n", pid);
             client->pid = pid;
             client->pty = pty;
-            client->running = true;
             if (client->size.ws_row > 0 && client->size.ws_col > 0)
                 ioctl(client->pty, TIOCSWINSZ, &client->size);
 
-            while (client->running) {
-                FD_ZERO (&des_set);
-                FD_SET (pty, &des_set);
-                struct timeval tv = { 1, 0 };
-                int ret = select(pty + 1, &des_set, NULL, NULL, &tv);
-                if (ret == 0) continue;
-                if (ret < 0) break;
-
-                if (FD_ISSET (pty, &des_set)) {
-                    while (client->running) {
-                        pthread_mutex_lock(&client->mutex);
-                        while (client->state == STATE_READY) {
-                            pthread_cond_wait(&client->cond, &client->mutex);
-                        }
-                        memset(client->pty_buffer, 0, sizeof(client->pty_buffer));
-                        client->pty_len = read(pty, client->pty_buffer + LWS_PRE + 1, BUF_SIZE);
-                        client->state = STATE_READY;
-                        pthread_mutex_unlock(&client->mutex);
-                        break;
-                    }
-                }
-
-                if (client->pty_len <= 0) break;
+            if (aeCreateFileEvent(client->loop, pty, AE_READABLE, handle_pty_data ,args) != AE_OK) {
+                lwsl_err("aeCreateFileEvent failed: %d\n", errno);
+                pthread_mutex_lock(&client->mutex);
+                client->pty_len = -1;
+                client->state = STATE_READY;
+                pthread_mutex_unlock(&client->mutex);
+                break;
             }
+
+            aeMain(client->loop);
             break;
     }
 
@@ -256,7 +252,6 @@ callback_tty(struct lws *wsi, enum lws_callback_reasons reason,
             break;
 
         case LWS_CALLBACK_ESTABLISHED:
-            client->running = false;
             client->initialized = false;
             client->initial_cmd_index = 0;
             client->authenticated = false;

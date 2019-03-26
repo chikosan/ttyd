@@ -1,6 +1,7 @@
 #include <stdbool.h>
 #include <sys/ioctl.h>
 #include <sys/queue.h>
+#include "ae.h"
 
 // client message
 #define INPUT '0'
@@ -27,7 +28,6 @@ enum pty_state {
 };
 
 struct tty_client {
-    bool running;
     bool initialized;
     int initial_cmd_index;
     bool authenticated;
@@ -47,6 +47,8 @@ struct tty_client {
     pthread_t thread;
     pthread_mutex_t mutex;
     pthread_cond_t cond;
+
+    aeEventLoop *loop;
 
     LIST_ENTRY(tty_client) list;
 };
