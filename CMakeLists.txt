@@ -29,35 +29,20 @@ else()
     set(CMAKE_C_STANDARD 99)
 endif()
 
-set(LIBWEBSOCKETS_MIN_VERSION 1.7.0)
-set(SOURCE_FILES src/server.c src/http.c src/protocol.c src/utils.c src/ae.c src/anet.c src/zmalloc.c)
+set(BUILD_SHARED_LIBS OFF CACHE INTERNAL "build static json-c")
+
+add_subdirectory(deps/ae)
+add_subdirectory(deps/wslay)
+add_subdirectory(deps/json-c)
+
+set(SOURCE_FILES
+        src/server.c
+        src/http.c
+        src/protocol.c
+        src/utils.c)
 
 find_package(OpenSSL REQUIRED)
-find_package(Libwebsockets ${LIBWEBSOCKETS_MIN_VERSION} QUIET)
-
-find_package(PkgConfig)
-
-if(Libwebsockets_FOUND)
-    set(LIBWEBSOCKETS_INCLUDE_DIR ${LIBWEBSOCKETS_INCLUDE_DIR} ${LIBWEBSOCKETS_INCLUDE_DIRS})
-else() # try to find libwebsockets with pkg-config
-    pkg_check_modules(Libwebsockets REQUIRED libwebsockets>=${LIBWEBSOCKETS_MIN_VERSION})
-    find_path(LIBWEBSOCKETS_INCLUDE_DIR libwebsockets.h
-            HINTS ${LIBWEBSOCKETS_INCLUDEDIR} ${LIBWEBSOCKETS_INCLUDE_DIRS})
-    find_library(LIBWEBSOCKETS_LIBRARIES NAMES websockets libwebsockets
-            HINTS ${LIBWEBSOCKETS_LIBDIR} ${LIBWEBSOCKETS_LIBRARY_DIRS})
-    include(FindPackageHandleStandardArgs)
-    find_package_handle_standard_args(LIBWEBSOCKETS DEFAULT_MSG LIBWEBSOCKETS_LIBRARIES LIBWEBSOCKETS_INCLUDE_DIR)
-    mark_as_advanced(LIBWEBSOCKETS_INCLUDE_DIR LIBWEBSOCKETS_LIBRARIES)
-endif()
-
-pkg_check_modules(PC_JSON-C REQUIRED json-c)
-find_path(JSON-C_INCLUDE_DIR json.h
-        HINTS ${PC_JSON-C_INCLUDEDIR} ${PC_JSON-C_INCLUDE_DIRS} PATH_SUFFIXES json-c json)
-find_library(JSON-C_LIBRARY NAMES json-c libjson-c
-        HINTS ${PC_JSON-C_LIBDIR} ${PC_JSON-C_LIBRARY_DIRS})
-include(FindPackageHandleStandardArgs)
-find_package_handle_standard_args(JSON-C DEFAULT_MSG JSON-C_LIBRARY JSON-C_INCLUDE_DIR)
-mark_as_advanced(JSON-C_INCLUDE_DIR JSON-C_LIBRARY)
+find_package(Libwebsockets 1.7.0 REQUIRED)
 
 find_program(CMAKE_XXD NAMES xxd)
 add_custom_command(OUTPUT html.h
@@ -66,8 +51,8 @@ add_custom_command(OUTPUT html.h
         COMMENT "Generating html.h from index.html")
 list(APPEND SOURCE_FILES html.h)
 
-set(INCLUDE_DIRS ${OPENSSL_INCLUDE_DIR} ${LIBWEBSOCKETS_INCLUDE_DIR} ${JSON-C_INCLUDE_DIR})
-set(LINK_LIBS pthread ${OPENSSL_LIBRARIES} ${LIBWEBSOCKETS_LIBRARIES} ${JSON-C_LIBRARY})
+set(INCLUDE_DIRS ${OPENSSL_INCLUDE_DIR} ${LIBWEBSOCKETS_INCLUDE_DIR})
+set(LINK_LIBS pthread ae wslay json-c ${OPENSSL_LIBRARIES} ${LIBWEBSOCKETS_LIBRARIES})
 
 if(APPLE)
     # required for the new homebrew version of libwebsockets
